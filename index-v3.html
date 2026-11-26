@@ -1,0 +1,923 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Simulador de Casos Clínicos</title>
+<script src="https://cdn.tailwindcss.com/3.4.17"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.24.7/babel.min.js"></script>
+<!-- Firebase SDK (Compat) -->
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
+<style>
+:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{background:#faf6ef;color:#292524;font-family:Inter,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect } = React;
+
+// =========================================================================
+// FIREBASE CONFIG (mesmo projeto do Med Review, em coleção separada)
+// =========================================================================
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyDv9RToofGgtW57WIavrsOY6azshFg5rHw",
+  authDomain: "med-review-abae5.firebaseapp.com",
+  projectId: "med-review-abae5",
+  storageBucket: "med-review-abae5.firebasestorage.app",
+  messagingSenderId: "503108478430",
+  appId: "1:503108478430:web:03e80333c72b08d6e1294f"
+};
+
+const COLLECTION_NAME = "simulador_prontuarios";
+
+let db = null;
+const firebaseConfigurado =
+  FIREBASE_CONFIG.apiKey &&
+  !FIREBASE_CONFIG.apiKey.startsWith("COLE_") &&
+  FIREBASE_CONFIG.projectId &&
+  !FIREBASE_CONFIG.projectId.startsWith("SEU_");
+
+if (firebaseConfigurado && window.firebase) {
+  try {
+    if (!firebase.apps.length) firebase.initializeApp(FIREBASE_CONFIG);
+    db = firebase.firestore();
+  } catch (e) {
+    console.error("Erro ao iniciar Firebase:", e);
+  }
+}
+
+// =========================================================================
+// CONSTANTES E LÓGICA CLÍNICA
+// =========================================================================
+const AREAS = ["Clínica Médica", "Cirurgia Geral", "Ginecologia e Obstetrícia", "Pediatria", "Medicina de Família/Preventiva"];
+const CENS = ["Atenção Primária (UBS/Ambulatório)", "Urgência e Emergência (UPA/PS)", "Enfermaria"];
+const DIFS = [
+  ["Básico", "apresentação clássica"],
+  ["Intermediário", "comorbidades / diagnóstico diferencial"],
+  ["Desafiador", "apresentação atípica ou paciente complexo"]
+];
+const ABAS = [
+  ["anamnese", "Anamnese"],
+  ["exame_fisico", "Exame Físico"],
+  ["exames", "Exames Complementares"]
+];
+const MODELOS_PADRAO = [
+  ["auto", "Automático (escolhe o melhor modelo da sua chave)"],
+  ["gemini-3.8-flash", "Gemini 3.8 Flash"],
+  ["gemini-3.0-flash", "Gemini 3.0 Flash"],
+  ["gemini-2.5-flash", "Gemini 2.5 Flash"],
+  ["gemini-2.5-pro", "Gemini 2.5 Pro"]
+];
+
+const shuffle = a => {
+  a = [...a];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+};
+const clamp = x => Math.max(0, Math.min(100, Math.round(x)));
+
+function montarPrompt(cfg, hist) {
+  const evitar = hist.length ? `\nNÃO repita estes diagnósticos já usados nesta sessão: ${hist.map(h => h.dx).join("; ")}.` : "";
+  return `Você é um professor de Medicina brasileiro elaborando um caso clínico INÉDITO para treinamento de estudantes.
+Grande área: ${cfg.area}. Cenário: ${cfg.cen}. Dificuldade: ${cfg.dif[0]} (${cfg.dif[1]}).${cfg.foco && cfg.foco.trim() ? `\nDIRECIONAMENTO DO ESTUDANTE (prioridade alta): o caso deve abordar "${cfg.foco.trim()}" (especialidade, síndrome ou tema), de forma coerente com a grande área e o cenário. Se houver conflito entre prevalência e direcionamento, priorize o direcionamento.` : ""}
+Baseie o caso nas doenças MAIS PREVALENTES na prática médica brasileira para essa área e cenário (perfil epidemiológico do SUS). Varie idade, sexo e contexto. Semente de variação: ${Math.random().toString(36).slice(2, 8)}.${evitar}
+Responda SOMENTE com JSON válido (sem markdown, sem texto extra) neste schema:
+{"paciente":{"nome":"nome fictício","idade":"ex: 54 anos","sexo":"M ou F","cenario":"local de atendimento","sinais_vitais":{"PA":"","FC":"","FR":"","Temp":"","SpO2":"","Glicemia capilar":""}},
+"relato_inicial":"queixa principal em 1ª pessoa, linguagem natural e realista do paciente",
+"acoes":[{"aba":"anamnese|exame_fisico|exames","texto_botao":"curto","resposta_ou_laudo":"resposta do paciente / achado / laudo realista","categoria":"essencial|util|distrator","justificativa_clinica":"por que é essencial, útil ou desnecessário"}],
+"hipoteses":[{"texto":"diagnóstico","correta":true|false,"justificativa":""}],
+"condutas":[{"texto":"conduta","tipo":"correta|incompleta|prejudicial","justificativa":""}],
+"resumo":{"diagnostico":"","criterios":"critérios diagnósticos objetivos","conduta":"conduta resumida","referencias":"diretrizes brasileiras atualizadas (MS, SBC, SBP, FEBRASGO, SBPT, etc.)"}}
+Regras: "acoes" tem de 12 a 16 itens no total, com pelo menos 3 por aba; 4 a 6 essenciais (inclua pesquisa de sinais de alarme), 3 a 5 úteis e 3 a 5 distratores (perguntas irrelevantes ou exames desnecessários/caros). Os distratores devem ter respostas plausíveis, sem entregar o diagnóstico. "hipoteses": exatamente 4, sendo 1 correta e 3 diagnósticos diferenciais pertinentes. "condutas": de 6 a 8, com 3 a 4 corretas/prioritárias, 1 a 2 incompletas e 2 prejudiciais/iatrogênicas. Todas as respostas em português do Brasil, doses e condutas conforme diretrizes brasileiras vigentes.`;
+}
+
+function aval(c, asked, hip, cond) {
+  const A = c.acoes, got = A.filter(a => asked.includes(a.id));
+  const by = (l, k) => l.filter(x => x.categoria === k);
+  const E = by(A, "essencial"), U = by(A, "util"), gE = by(got, "essencial"), gU = by(got, "util"), gD = by(got, "distrator");
+  const coleta = clamp((2 * gE.length + gU.length - gD.length) / Math.max(1, 2 * E.length + U.length) * 100);
+  const h = c.hipoteses[hip], acc = h.correta ? 100 : 0;
+  const sel = cond.map(i => c.condutas[i]), C = c.condutas.filter(x => x.tipo === "correta");
+  const sC = sel.filter(x => x.tipo === "correta"), sI = sel.filter(x => x.tipo === "incompleta"), sP = sel.filter(x => x.tipo === "prejudicial");
+  const seg = clamp((sC.length - 0.5 * sI.length - 2 * sP.length) / Math.max(1, C.length) * 100);
+  return {
+    coleta, acc, seg, h, gE, gU, gD,
+    missE: E.filter(a => !asked.includes(a.id)),
+    sC, sI, sP,
+    missC: C.filter(x => !sel.includes(x)),
+    certa: c.hipoteses.find(x => x.correta)
+  };
+}
+
+// =========================================================================
+// API GEMINI (AI STUDIO) COM DESCOBERTA AUTOMÁTICA DE MODELOS
+// =========================================================================
+async function listarModelosDisponiveis(apiKeyBruta) {
+  const chave = apiKeyBruta.trim();
+  const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(chave)}`;
+  const resp = await fetch(url);
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    throw new Error(data?.error?.message || ("HTTP " + resp.status));
+  }
+  const ignorar = /embedding|imagen|veo|tts|audio|image|robotics|computer-use|aqa|bisheng|learnlm/i;
+  const lista = (data.models || [])
+    .filter(m =>
+      Array.isArray(m.supportedGenerationMethods) &&
+      m.supportedGenerationMethods.includes("generateContent") &&
+      /^models\/gemini/i.test(m.name || "") &&
+      !ignorar.test(m.name || "")
+    )
+    .map(m => [m.name.replace(/^models\//, ""), m.displayName || m.name.replace(/^models\//, "")]);
+
+  // Ordena priorizando versões Flash mais recentes
+  const score = id => {
+    const ver = parseFloat((id.match(/gemini-(\d+(?:\.\d+)?)/i) || [])[1] || "0");
+    let s = ver * 100;
+    if (/flash/i.test(id) && !/lite|preview|exp/i.test(id)) s += 40;
+    else if (/flash/i.test(id)) s += 25;
+    else if (/pro/i.test(id) && !/preview|exp/i.test(id)) s += 15;
+    if (/latest/i.test(id)) s += 5;
+    return s;
+  };
+  lista.sort((a, b) => score(b[0]) - score(a[0]));
+  return lista;
+}
+
+async function chamarModeloAIStudio(chave, modeloId, bodyObj) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modeloId)}:generateContent?key=${encodeURIComponent(chave)}`;
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(bodyObj)
+  });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    const err = new Error(data?.error?.message || ("HTTP " + resp.status));
+    err.status = resp.status;
+    throw err;
+  }
+  return data;
+}
+
+async function chamarGemini(apiKeyBruta, modeloSelecionado, bodyObj) {
+  const chave = apiKeyBruta.trim();
+  const tentarLista = [];
+
+  if (modeloSelecionado && modeloSelecionado !== "auto") {
+    tentarLista.push(modeloSelecionado);
+  }
+
+  // Se estiver em "auto" ou o modelo escolhido der 404, descobre os modelos liberados na chave
+  if (!tentarLista.length) {
+    const disp = await listarModelosDisponiveis(chave);
+    if (!disp.length) throw new Error("Nenhum modelo Gemini disponível para esta chave.");
+    tentarLista.push(...disp.slice(0, 4).map(x => x[0]));
+  }
+
+  let ultimoErro = null;
+  for (let i = 0; i < tentarLista.length; i++) {
+    const mId = tentarLista[i];
+    try {
+      const data = await chamarModeloAIStudio(chave, mId, bodyObj);
+      return { data, modeloUsado: mId };
+    } catch (e) {
+      ultimoErro = e;
+      // Se deu 404 no modelo fixo escolhido, busca automaticamente os modelos da conta e tenta
+      if (e.status === 404 && modeloSelecionado !== "auto" && i === 0) {
+        try {
+          const disp = await listarModelosDisponiveis(chave);
+          for (const [altId] of disp.slice(0, 4)) {
+            if (altId === mId) continue;
+            try {
+              const data = await chamarModeloAIStudio(chave, altId, bodyObj);
+              return { data, modeloUsado: altId };
+            } catch (e2) {
+              ultimoErro = e2;
+              if (e2.status === 429) break;
+            }
+          }
+        } catch {}
+        break;
+      }
+      if (e.status === 429 || e.status === 401 || e.status === 403) break;
+    }
+  }
+  throw ultimoErro || new Error("Erro desconhecido ao chamar a API do Gemini.");
+}
+
+function extrairTextoGemini(data) {
+  const parts = data?.candidates?.[0]?.content?.parts || [];
+  return parts
+    .filter(p => !p.thought && typeof p.text === "string")
+    .map(p => p.text)
+    .join("\n")
+    .trim();
+}
+
+// =========================================================================
+// COMPONENTES DE INTERFACE
+// =========================================================================
+const Card = ({ className = "", children }) => (
+  <div className={"bg-white rounded-2xl border border-stone-200 shadow-sm p-4 " + className}>{children}</div>
+);
+
+const Chip = ({ on, onClick, children, sub }) => (
+  <button
+    onClick={onClick}
+    className={"text-left rounded-xl border px-3 py-2 text-sm transition " + (on ? "bg-teal-700 border-teal-700 text-white" : "bg-white border-stone-300 hover:border-teal-600")}
+  >
+    <div className="font-medium">{children}</div>
+    {sub && <div className={"text-xs " + (on ? "text-teal-100" : "text-stone-500")}>{sub}</div>}
+  </button>
+);
+
+const Btn = ({ onClick, disabled, children, kind = "main", className = "" }) => (
+  <button
+    onClick={onClick}
+    disabled={disabled}
+    className={"rounded-xl px-5 py-3 font-semibold text-sm transition disabled:opacity-50 " + (kind === "main" ? "bg-teal-700 text-white hover:bg-teal-800" : "bg-white border border-stone-300 hover:bg-stone-50") + " " + className}
+  >
+    {children}
+  </button>
+);
+
+const Bar = ({ label, v }) => (
+  <div>
+    <div className="flex justify-between text-sm mb-1"><span>{label}</span><b>{v}%</b></div>
+    <div className="h-2.5 rounded-full bg-stone-200">
+      <div className={"h-2.5 rounded-full " + (v >= 70 ? "bg-emerald-500" : v >= 40 ? "bg-amber-500" : "bg-rose-500")} style={{ width: v + "%" }} />
+    </div>
+  </div>
+);
+
+function Bloco({ titulo, cor, itens, vazio }) {
+  const cores = {
+    ok: "border-emerald-200 bg-emerald-50/60 text-emerald-900",
+    warn: "border-amber-200 bg-amber-50/60 text-amber-900",
+    bad: "border-rose-200 bg-rose-50/60 text-rose-900"
+  };
+  return (
+    <div className={"rounded-2xl border p-4 " + cores[cor]}>
+      <h3 className="font-bold mb-2">{titulo}</h3>
+      {itens.length ? (
+        <ul className="space-y-2">
+          {itens.map((t, i) => (
+            <li key={i} className="text-sm">
+              <div className="font-medium">{t[0]}</div>
+              <div className="opacity-80">{t[1]}</div>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="text-sm opacity-70">{vazio}</p>
+      )}
+    </div>
+  );
+}
+
+// =========================================================================
+// ARMAZENAMENTO LOCAL + CHAVE API
+// =========================================================================
+const KEY_LOCAL = "simulador_prontuarios_v1";
+const KEY_API = "simulador_gemini_api_key";
+const KEY_MODEL = "simulador_gemini_model_v3";
+
+const loadLocal = () => { try { return JSON.parse(localStorage.getItem(KEY_LOCAL) || "[]"); } catch { return []; } };
+const saveLocal = l => { try { localStorage.setItem(KEY_LOCAL, JSON.stringify(l)); } catch {} };
+
+// =========================================================================
+// APP PRINCIPAL
+// =========================================================================
+function App() {
+  const [stage, setStage] = useState("config");
+  const [pront, setPront] = useState(loadLocal);
+  const [cloudStatus, setCloudStatus] = useState(db ? "conectando" : "local");
+  const [view, setView] = useState("novo");
+  const [rev, setRev] = useState(false);
+  const [delId, setDelId] = useState(null);
+
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem(KEY_API) || "");
+  const [modelo, setModelo] = useState(() => localStorage.getItem(KEY_MODEL) || "auto");
+  const [modelosLista, setModelosLista] = useState(MODELOS_PADRAO);
+  const [showApiModal, setShowApiModal] = useState(false);
+  const [apiDraft, setApiDraft] = useState("");
+  const [modelDraft, setModelDraft] = useState(modelo);
+  const [testando, setTestando] = useState(false);
+  const [testeMsg, setTesteMsg] = useState(null);
+
+  const [cfg, setCfg] = useState({ area: AREAS[0], cen: CENS[0], dif: DIFS[0], foco: "" });
+  const [caso, setCaso] = useState(null);
+  const [asked, setAsked] = useState([]);
+  const [tab, setTab] = useState("anamnese");
+  const [mob, setMob] = useState("pront");
+  const [hip, setHip] = useState(null);
+  const [cond, setCond] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState("");
+  const [hist, setHist] = useState([]);
+  const [res, setRes] = useState(null);
+
+  // Sincronização em tempo real com Firebase Firestore (coleção isolada)
+  useEffect(() => {
+    if (!db) {
+      setCloudStatus("local");
+      return;
+    }
+    const unsub = db
+      .collection(COLLECTION_NAME)
+      .orderBy("id", "asc")
+      .onSnapshot(
+        snap => {
+          const lista = snap.docs.map(d => d.data());
+          setPront(lista);
+          saveLocal(lista);
+          setCloudStatus("online");
+        },
+        error => {
+          console.error("Erro Firestore:", error);
+          setCloudStatus("erro");
+        }
+      );
+    return () => unsub();
+  }, []);
+
+  function abrirConfigApi() {
+    setApiDraft(apiKey);
+    setModelDraft(modelo);
+    setTesteMsg(null);
+    setShowApiModal(true);
+  }
+
+  function salvarConfigApi() {
+    const limpa = apiDraft.trim();
+    setApiKey(limpa);
+    setModelo(modelDraft);
+    localStorage.setItem(KEY_API, limpa);
+    localStorage.setItem(KEY_MODEL, modelDraft);
+    setShowApiModal(false);
+    setErr("");
+  }
+
+  async function testarChave() {
+    if (!apiDraft.trim()) {
+      setTesteMsg({ ok: false, texto: "Cole sua chave antes de testar." });
+      return;
+    }
+    setTestando(true);
+    setTesteMsg(null);
+    try {
+      // Atualiza lista de modelos disponíveis para esta chave
+      let listaAtualizada = null;
+      try {
+        const disp = await listarModelosDisponiveis(apiDraft);
+        if (disp.length) {
+          listaAtualizada = [["auto", "Automático (melhor modelo disponível)"], ...disp];
+          setModelosLista(listaAtualizada);
+        }
+      } catch {}
+
+      const { modeloUsado } = await chamarGemini(apiDraft, modelDraft, {
+        contents: [{ role: "user", parts: [{ text: "Responda apenas: OK" }] }],
+        generationConfig: { maxOutputTokens: 10 }
+      });
+      setModelDraft(modeloUsado);
+      setTesteMsg({ ok: true, texto: `✅ Chave funcionando! Modelo ativo: ${modeloUsado}. Clique em Salvar.` });
+    } catch (e) {
+      setTesteMsg({ ok: false, texto: `Erro retornado pelo Google: ${e.message}` });
+    } finally {
+      setTestando(false);
+    }
+  }
+
+  async function chamar() {
+    if (!apiKey.trim()) {
+      abrirConfigApi();
+      return;
+    }
+    setLoading(true);
+    setErr("");
+    try {
+      const { data, modeloUsado } = await chamarGemini(apiKey, modelo, {
+        contents: [{ role: "user", parts: [{ text: montarPrompt(cfg, hist) }] }],
+        generationConfig: {
+          responseMimeType: "application/json",
+          temperature: 0.9
+        }
+      });
+
+      if (modeloUsado && modeloUsado !== modelo && modelo !== "auto") {
+        setModelo(modeloUsado);
+        localStorage.setItem(KEY_MODEL, modeloUsado);
+      }
+
+      const rawText = extrairTextoGemini(data);
+      const jsonText = rawText.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```$/i, "").trim();
+      const c = JSON.parse(jsonText);
+
+      if (
+        !c ||
+        !Array.isArray(c.acoes) ||
+        c.acoes.length < 8 ||
+        !Array.isArray(c.hipoteses) ||
+        c.hipoteses.filter(h => h.correta).length !== 1 ||
+        !Array.isArray(c.condutas) ||
+        !c.paciente
+      ) {
+        throw new Error("O modelo respondeu em formato incompleto. Tente gerar novamente.");
+      }
+
+      c.acoes = shuffle(c.acoes.map((a, i) => ({ ...a, id: i })));
+      c.hipoteses = shuffle(c.hipoteses);
+      c.condutas = shuffle(c.condutas);
+      setCaso(c);
+      setAsked([]);
+      setTab("anamnese");
+      setMob("pront");
+      setHip(null);
+      setCond([]);
+      setRes(null);
+      setRev(false);
+      setStage("atendimento");
+    } catch (e) {
+      setErr(e?.message || "Não foi possível gerar um caso válido agora. Tente novamente.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function finalizar() {
+    const r = aval(caso, asked, hip, cond);
+    setRes(r);
+    setHist(h => [...h, { nome: caso.paciente.nome, dx: r.certa.texto, coleta: r.coleta, acc: r.acc, seg: r.seg }]);
+
+    const rec = JSON.parse(JSON.stringify({
+      id: Date.now(),
+      data: new Date().toISOString(),
+      cfg: { area: cfg.area, cen: cfg.cen, dif: cfg.dif[0], foco: cfg.foco.trim() },
+      caso,
+      asked,
+      hip,
+      cond
+    }));
+
+    const n = [...pront, rec];
+    saveLocal(n);
+    if (!db) {
+      setPront(n);
+    } else {
+      try {
+        await db.collection(COLLECTION_NAME).doc(String(rec.id)).set(rec);
+      } catch (e) {
+        console.error("Erro ao salvar no Firestore:", e);
+        setPront(n);
+        setCloudStatus("erro");
+      }
+    }
+    setStage("feedback");
+  }
+
+  async function excluir(id) {
+    const n = pront.filter(x => x.id !== id);
+    saveLocal(n);
+    setDelId(null);
+    if (!db) {
+      setPront(n);
+    } else {
+      try {
+        await db.collection(COLLECTION_NAME).doc(String(id)).delete();
+      } catch (e) {
+        console.error("Erro ao excluir do Firestore:", e);
+        setPront(n);
+      }
+    }
+  }
+
+  const pedir = id => setAsked(a => a.includes(id) ? a : [...a, id]);
+  const toggle = i => setCond(c => c.includes(i) ? c.filter(x => x !== i) : [...c, i]);
+
+  function abrir(r0) {
+    setCaso(r0.caso);
+    setAsked(r0.asked);
+    setHip(r0.hip);
+    setCond(r0.cond);
+    setRes(aval(r0.caso, r0.asked, r0.hip, r0.cond));
+    setRev(true);
+    setStage("feedback");
+  }
+
+  const badgeNuvem = {
+    online: ["☁️ Firebase conectado", "bg-emerald-50 text-emerald-800 border-emerald-200"],
+    conectando: ["☁️ Conectando…", "bg-stone-100 text-stone-600 border-stone-200"],
+    local: ["💾 Apenas local", "bg-amber-50 text-amber-800 border-amber-200"],
+    erro: ["⚠️ Erro na nuvem (salvo local)", "bg-rose-50 text-rose-800 border-rose-200"]
+  }[cloudStatus];
+
+  const Header = (
+    <div className="mb-5 flex flex-wrap items-start justify-between gap-3">
+      <div>
+        <h1 className="text-2xl font-bold text-teal-900">🩺 Simulador de Casos Clínicos</h1>
+        <p className="text-sm text-stone-500">Casos inéditos gerados por IA, com foco na epidemiologia brasileira.</p>
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className={"text-xs font-medium px-2.5 py-1.5 rounded-lg border " + badgeNuvem[1]}>
+          {badgeNuvem[0]}
+        </span>
+        <button
+          onClick={abrirConfigApi}
+          className={"text-xs font-medium px-3 py-1.5 rounded-lg border transition " + (apiKey ? "bg-white border-stone-300 text-stone-700 hover:border-teal-600" : "bg-amber-50 border-amber-300 text-amber-900 hover:bg-amber-100")}
+        >
+          ⚙️ {apiKey ? "API Gemini" : "Configurar API"}
+        </button>
+      </div>
+    </div>
+  );
+
+  const ApiModal = showApiModal && (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={() => setShowApiModal(false)}>
+      <div className="bg-white rounded-2xl border border-stone-200 shadow-xl max-w-md w-full p-5 space-y-4" onClick={e => e.stopPropagation()}>
+        <div>
+          <h2 className="font-bold text-lg text-teal-900">Configurar API do Gemini</h2>
+          <p className="text-xs text-stone-500 mt-1">
+            A chave fica salva apenas neste navegador e nunca vai para o código no GitHub. Crie gratuitamente no{" "}
+            <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-teal-700 underline">
+              Google AI Studio
+            </a>.
+          </p>
+        </div>
+        <div>
+          <label className="block text-xs font-semibold text-stone-700 mb-1">Chave da API (Gemini API Key)</label>
+          <input
+            type="password"
+            value={apiDraft}
+            onChange={e => setApiDraft(e.target.value)}
+            placeholder="Cole sua chave do Google AI Studio"
+            className="w-full rounded-xl border border-stone-300 px-3 py-2.5 text-sm focus:outline-none focus:border-teal-600"
+          />
+        </div>
+        <div>
+          <label className="block text-xs font-semibold text-stone-700 mb-1">Modelo</label>
+          <select
+            value={modelDraft}
+            onChange={e => setModelDraft(e.target.value)}
+            className="w-full rounded-xl border border-stone-300 bg-white px-3 py-2.5 text-sm focus:outline-none focus:border-teal-600"
+          >
+            {modelosLista.map(([id, label]) => <option key={id} value={id}>{label}</option>)}
+          </select>
+          <p className="text-[11px] text-stone-500 mt-1">Deixe em <b>Automático</b> para o app escolher o modelo mais novo liberado na sua chave.</p>
+        </div>
+        {testeMsg && (
+          <div className={"rounded-xl border p-2.5 text-xs break-words " + (testeMsg.ok ? "border-emerald-200 bg-emerald-50 text-emerald-900" : "border-rose-200 bg-rose-50 text-rose-800")}>
+            {testeMsg.texto}
+          </div>
+        )}
+        <div className="flex gap-2 pt-1">
+          <Btn kind="alt" onClick={testarChave} disabled={testando} className="!py-2.5">
+            {testando ? "Testando…" : "Testar chave"}
+          </Btn>
+          <Btn kind="alt" onClick={() => setShowApiModal(false)} className="flex-1 !py-2.5">Cancelar</Btn>
+          <Btn onClick={salvarConfigApi} className="flex-1 !py-2.5">Salvar</Btn>
+        </div>
+      </div>
+    </div>
+  );
+
+  const ErrBox = err && <div className="rounded-xl border border-rose-200 bg-rose-50 text-rose-800 text-xs sm:text-sm p-3 mt-4 break-words">{err}</div>;
+
+  const Lista = pront.length ? (
+    <div className="space-y-3">
+      {[...pront].reverse().map(r0 => {
+        const a = aval(r0.caso, r0.asked, r0.hip, r0.cond);
+        const q = r0.caso.paciente;
+        return (
+          <Card key={r0.id}>
+            <div className="flex flex-wrap justify-between gap-1">
+              <h3 className="font-bold">{q.nome} <span className="font-normal text-sm text-stone-500">· {q.idade} · {q.sexo}</span></h3>
+              <span className="text-xs text-stone-500">{new Date(r0.data).toLocaleDateString("pt-BR")}</span>
+            </div>
+            <p className="text-sm mt-1">Diagnóstico: <b>{a.certa.texto}</b></p>
+            <p className="text-xs text-stone-500">{r0.cfg.area} · {r0.cfg.cen} · {r0.cfg.dif}{r0.cfg.foco ? " · foco: " + r0.cfg.foco : ""}</p>
+            <p className="text-xs mt-1">Coleta {a.coleta}% · Diagnóstico {a.acc}% · Conduta {a.seg}%</p>
+            <div className="flex gap-2 mt-3">
+              <Btn kind="alt" onClick={() => abrir(r0)} className="flex-1 !py-2">Abrir prontuário</Btn>
+              {delId === r0.id
+                ? <Btn onClick={() => excluir(r0.id)} className="!py-2 !bg-rose-600">Confirmar exclusão</Btn>
+                : <Btn kind="alt" onClick={() => setDelId(r0.id)} className="!py-2">Excluir</Btn>}
+            </div>
+          </Card>
+        );
+      })}
+      <p className="text-xs text-stone-500 text-center">
+        {cloudStatus === "online"
+          ? `Sincronizado na nuvem (coleção "${COLLECTION_NAME}" no Firebase).`
+          : "Os prontuários ficam salvos neste navegador até o Firebase ser configurado."}
+      </p>
+    </div>
+  ) : (
+    <Card>
+      <p className="text-sm text-stone-500">
+        Nenhum paciente atendido ainda. Os casos finalizados ficam salvos automaticamente para consulta posterior.
+      </p>
+    </Card>
+  );
+
+  if (stage === "config") return (
+    <main className="max-w-3xl mx-auto p-4 sm:p-6">
+      {Header}
+      {ApiModal}
+      <div className="flex gap-1 mb-4 bg-stone-200/60 p-1 rounded-xl">
+        {[["novo", "Novo caso"], ["pront", "Prontuários (" + pront.length + ")"]].map(([k, l]) => (
+          <button key={k} onClick={() => setView(k)} className={"flex-1 py-2 rounded-lg text-sm font-medium " + (view === k ? "bg-white shadow-sm" : "text-stone-600")}>
+            {l}
+          </button>
+        ))}
+      </div>
+      {view === "pront" ? Lista : (
+        <>
+          <Card className="space-y-5">
+            {[["Grande área", AREAS.map(a => [a, null]), "area"], ["Cenário de atendimento", CENS.map(a => [a, null]), "cen"], ["Nível de dificuldade", DIFS, "dif"]].map(([t, opts, k]) => (
+              <div key={k}>
+                <h2 className="font-semibold mb-2">{t}</h2>
+                <div className="flex flex-wrap gap-2">
+                  {opts.map(([o, s]) => {
+                    const v = k === "dif" ? DIFS.find(d => d[0] === o) : o;
+                    return (
+                      <Chip key={o} sub={s} on={k === "dif" ? cfg.dif[0] === o : cfg[k] === o} onClick={() => setCfg({ ...cfg, [k]: v })}>
+                        {o}
+                      </Chip>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+            <div>
+              <h2 className="font-semibold mb-1">Direcionamento (opcional)</h2>
+              <input
+                value={cfg.foco}
+                onChange={e => setCfg({ ...cfg, foco: e.target.value })}
+                maxLength={200}
+                placeholder="Ex.: cardiologia, síndrome coronariana aguda, dor torácica…"
+                className="w-full rounded-xl border border-stone-300 bg-white px-3 py-2.5 text-sm focus:outline-none focus:border-teal-600"
+              />
+              <p className="text-xs text-stone-500 mt-1">Especialidade, síndrome ou tema específico. Deixe em branco para um caso livre.</p>
+            </div>
+            <Btn onClick={chamar} disabled={loading} className="w-full">
+              {loading ? "Gerando caso inédito…" : "Chamar Próximo Paciente"}
+            </Btn>
+            {ErrBox}
+          </Card>
+          {hist.length > 0 && (
+            <Card className="mt-4">
+              <h2 className="font-semibold mb-2">Casos resolvidos nesta sessão ({hist.length})</h2>
+              <ul className="divide-y divide-stone-100 text-sm">
+                {hist.map((h, i) => (
+                  <li key={i} className="py-2 flex flex-wrap justify-between gap-1">
+                    <span><b>{h.nome}</b> · {h.dx}</span>
+                    <span className="text-stone-500">Coleta {h.coleta}% · Diag. {h.acc}% · Conduta {h.seg}%</span>
+                  </li>
+                ))}
+              </ul>
+            </Card>
+          )}
+        </>
+      )}
+    </main>
+  );
+
+  if (!caso) return null;
+  const p = caso.paciente;
+
+  if (stage === "atendimento") {
+    const lista = caso.acoes.filter(a => a.aba === tab);
+    const feitos = asked.map(id => caso.acoes.find(a => a.id === id));
+    const Esq = (
+      <div className="space-y-4">
+        <Card>
+          <div className="flex flex-wrap justify-between gap-1">
+            <h2 className="font-bold text-lg">{p.nome}</h2>
+            <span className="text-sm text-stone-500">{p.idade} · {p.sexo}</span>
+          </div>
+          <p className="text-xs text-stone-500 mb-3">{p.cenario}</p>
+          <div className="grid grid-cols-3 gap-2">
+            {Object.entries(p.sinais_vitais || {}).map(([k, v]) => (
+              <div key={k} className="rounded-lg bg-stone-50 border border-stone-200 p-2 text-center">
+                <div className="text-[11px] text-stone-500">{k}</div>
+                <div className="text-sm font-semibold">{String(v)}</div>
+              </div>
+            ))}
+          </div>
+        </Card>
+        <Card className="bg-amber-50/50 border-amber-200">
+          <div className="text-xs font-semibold text-amber-800 mb-1">QUEIXA PRINCIPAL</div>
+          <p className="italic">“{caso.relato_inicial}”</p>
+        </Card>
+        <Card>
+          <h3 className="font-semibold mb-2">Prontuário evolutivo</h3>
+          {feitos.length ? (
+            <ul className="space-y-3">
+              {feitos.map(a => (
+                <li key={a.id} className="border-l-4 border-teal-600 pl-3 text-sm">
+                  <div className="text-xs font-semibold text-teal-800">{ABAS.find(x => x[0] === a.aba)?.[1]} · {a.texto_botao}</div>
+                  <div>{a.resposta_ou_laudo}</div>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-sm text-stone-500">Nenhuma investigação ainda. Use as abas para perguntar, examinar e solicitar exames.</p>
+          )}
+        </Card>
+      </div>
+    );
+    const Dir = (
+      <div className="space-y-4">
+        <Card>
+          <div className="flex gap-1 mb-3 overflow-x-auto">
+            {ABAS.map(([k, l]) => (
+              <button key={k} onClick={() => setTab(k)} className={"whitespace-nowrap px-3 py-2 rounded-lg text-sm font-medium " + (tab === k ? "bg-teal-700 text-white" : "bg-stone-100 text-stone-700")}>
+                {l}
+              </button>
+            ))}
+          </div>
+          <div className="grid gap-2">
+            {lista.map(a => {
+              const f = asked.includes(a.id);
+              return (
+                <button
+                  key={a.id}
+                  onClick={() => pedir(a.id)}
+                  disabled={f}
+                  className={"text-left rounded-xl border px-3 py-2.5 text-sm " + (f ? "bg-stone-100 text-stone-400 border-stone-200" : "bg-white border-stone-300 hover:border-teal-600")}
+                >
+                  {f ? "✓ " : ""}{a.texto_botao}
+                </button>
+              );
+            })}
+          </div>
+        </Card>
+        <Btn onClick={() => setStage("conduta")} className="w-full">Definir Conduta</Btn>
+      </div>
+    );
+    return (
+      <main className="max-w-6xl mx-auto p-4 sm:p-6">
+        {Header}
+        {ApiModal}
+        <div className="lg:hidden flex gap-1 mb-4 bg-stone-200/60 p-1 rounded-xl">
+          {[["pront", "Paciente e prontuário"], ["inv", "Investigar"]].map(([k, l]) => (
+            <button key={k} onClick={() => setMob(k)} className={"flex-1 py-2 rounded-lg text-sm font-medium " + (mob === k ? "bg-white shadow-sm" : "text-stone-600")}>
+              {l}{k === "pront" && asked.length ? ` (${asked.length})` : ""}
+            </button>
+          ))}
+        </div>
+        <div className="grid lg:grid-cols-2 gap-5">
+          <div className={mob === "pront" ? "" : "hidden lg:block"}>{Esq}</div>
+          <div className={mob === "inv" ? "" : "hidden lg:block"}>{Dir}</div>
+        </div>
+      </main>
+    );
+  }
+
+  if (stage === "conduta") return (
+    <main className="max-w-3xl mx-auto p-4 sm:p-6">
+      {Header}
+      {ApiModal}
+      <Card className="mb-4">
+        <h2 className="font-bold mb-2">Hipótese diagnóstica principal</h2>
+        <div className="grid gap-2">
+          {caso.hipoteses.map((h, i) => (
+            <button
+              key={i}
+              onClick={() => setHip(i)}
+              className={"text-left rounded-xl border px-3 py-2.5 text-sm " + (hip === i ? "bg-teal-700 border-teal-700 text-white" : "bg-white border-stone-300 hover:border-teal-600")}
+            >
+              {h.texto}
+            </button>
+          ))}
+        </div>
+      </Card>
+      <Card>
+        <h2 className="font-bold mb-1">Plano de conduta</h2>
+        <p className="text-xs text-stone-500 mb-2">Marque todas as condutas que você adotaria.</p>
+        <div className="grid gap-2">
+          {caso.condutas.map((c, i) => {
+            const on = cond.includes(i);
+            return (
+              <button
+                key={i}
+                onClick={() => toggle(i)}
+                className={"text-left rounded-xl border px-3 py-2.5 text-sm flex gap-2 " + (on ? "bg-teal-50 border-teal-600" : "bg-white border-stone-300 hover:border-teal-600")}
+              >
+                <span className={"mt-0.5 w-4 h-4 shrink-0 rounded border " + (on ? "bg-teal-700 border-teal-700 text-white text-[10px] flex items-center justify-center" : "border-stone-400")}>
+                  {on ? "✓" : ""}
+                </span>
+                <span>{c.texto}</span>
+              </button>
+            );
+          })}
+        </div>
+      </Card>
+      <div className="flex gap-2 mt-4">
+        <Btn kind="alt" onClick={() => setStage("atendimento")}>← Voltar ao paciente</Btn>
+        <Btn onClick={finalizar} disabled={hip === null || !cond.length} className="flex-1">Finalizar caso</Btn>
+      </div>
+    </main>
+  );
+
+  const r = res, geral = Math.round((r.coleta + r.acc + r.seg) / 3);
+  return (
+    <main className="max-w-3xl mx-auto p-4 sm:p-6">
+      {Header}
+      {ApiModal}
+      <Card className="mb-4">
+        <div className="flex justify-between items-baseline mb-3">
+          <h2 className="font-bold text-lg">Resultado — {p.nome}</h2>
+          <span className="text-2xl font-bold text-teal-800">{geral}%</span>
+        </div>
+        <div className="space-y-3">
+          <Bar label="Coleta de Dados" v={r.coleta} />
+          <Bar label="Acurácia Diagnóstica" v={r.acc} />
+          <Bar label="Segurança da Conduta" v={r.seg} />
+        </div>
+        <p className="text-sm mt-3">
+          Diagnóstico: <b>{r.certa.texto}</b>
+          {!r.h.correta && <span className="text-rose-700"> (você escolheu: {r.h.texto})</span>}
+        </p>
+      </Card>
+      <div className="space-y-3">
+        <Bloco
+          titulo="✅ O que você acertou"
+          cor="ok"
+          vazio="Nada a destacar neste caso."
+          itens={[
+            ...r.gE.map(a => [a.texto_botao, a.justificativa_clinica]),
+            ...(r.h.correta ? [["Hipótese principal correta", r.h.justificativa]] : []),
+            ...r.sC.map(c => [c.texto, c.justificativa])
+          ]}
+        />
+        <Bloco
+          titulo="🔎 O que poderia ter feito diferente"
+          cor="warn"
+          vazio="Você não omitiu nada essencial."
+          itens={[
+            ...r.missE.map(a => ["Não investigado: " + a.texto_botao, a.justificativa_clinica]),
+            ...(r.h.correta ? [] : [["Hipótese correta: " + r.certa.texto, r.certa.justificativa]]),
+            ...r.missC.map(c => ["Conduta omitida: " + c.texto, c.justificativa])
+          ]}
+        />
+        <Bloco
+          titulo="⚠️ Excessos / Pontos de atenção"
+          cor="bad"
+          vazio="Sem excessos — boa racionalização de recursos."
+          itens={[
+            ...r.gD.map(a => ["Desnecessário: " + a.texto_botao, a.justificativa_clinica]),
+            ...r.sI.map(c => ["Conduta incompleta: " + c.texto, c.justificativa]),
+            ...r.sP.map(c => ["Conduta prejudicial: " + c.texto, c.justificativa])
+          ]}
+        />
+      </div>
+      <Card className="mt-4">
+        <h3 className="font-semibold mb-1">Prontuário do atendimento</h3>
+        <p className="text-xs text-stone-500 mb-2">
+          {p.idade} · {p.sexo} · {p.cenario} · {Object.entries(p.sinais_vitais || {}).map(([k, v]) => k + " " + v).join(" · ")}
+        </p>
+        <p className="italic text-sm mb-3">“{caso.relato_inicial}”</p>
+        {asked.length ? (
+          <ul className="space-y-3">
+            {asked.map(id => caso.acoes.find(a => a.id === id)).filter(Boolean).map(a => (
+              <li key={a.id} className="border-l-4 border-teal-600 pl-3 text-sm">
+                <div className="text-xs font-semibold text-teal-800">{ABAS.find(x => x[0] === a.aba)?.[1]} · {a.texto_botao}</div>
+                <div>{a.resposta_ou_laudo}</div>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-sm text-stone-500">Nenhuma investigação realizada.</p>
+        )}
+      </Card>
+      <Card className="mt-4 border-teal-200 bg-teal-50/40">
+        <h3 className="font-bold text-teal-900 mb-2">📌 Resumo de Alto Rendimento</h3>
+        <dl className="text-sm space-y-2">
+          {[["Diagnóstico", caso.resumo?.diagnostico], ["Critérios diagnósticos", caso.resumo?.criterios], ["Conduta", caso.resumo?.conduta], ["Referências", caso.resumo?.referencias]].map(([k, v]) => v && (
+            <div key={k}><dt className="font-semibold">{k}</dt><dd className="text-stone-700">{v}</dd></div>
+          ))}
+        </dl>
+        <p className="text-xs text-stone-500 mt-3">Conteúdo gerado por IA para estudo: confirme sempre nas diretrizes oficiais antes de aplicar na prática.</p>
+      </Card>
+      <Btn onClick={() => { setStage("config"); setCaso(null); setView(rev ? "pront" : "novo"); setRev(false); }} className="w-full mt-4">
+        {rev ? "Voltar aos prontuários" : "Atender Novo Caso"}
+      </Btn>
+    </main>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
